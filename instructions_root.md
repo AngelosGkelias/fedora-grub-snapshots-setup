@@ -114,11 +114,10 @@ To bypass this restriction and make a rollback permanent, you must manually swap
 
 #### 1. Open Top-Level Access to the Drive
 
-Mount the raw top-level directory of your Btrfs partition (subvol=/) directly to the pre-existing, empty /mnt folder. Even though your active snapshot workspace is read-only, mounting the drive's base layer this way opens it with full read-write privileges:
+Mount the raw top-level directory of your Btrfs partition (`subvol=/`) directly to the pre-existing, empty `/mnt` folder. Even though your active snapshot workspace is read-only, mounting the drive's base layer this way opens it with full read-write privileges. We run all subsequent commands using absolute paths from `/mnt` to avoid "device is busy" errors when unmounting later:
 
 ```bash
 sudo mount -o subvol=/ /dev/sdXN /mnt
-cd /mnt
 ```
 
 #### 2. Displace the Broken Root Subvolume
@@ -126,23 +125,43 @@ cd /mnt
 Rename the broken root subvolume to clear the path. Because Btrfs treats subvolumes like standard directory objects at the root layer, this moves your entire broken OS state and its nested snapshots safely aside:
 
 ```bash
-sudo mv root root_broken
+sudo mv /mnt/root /mnt/root_broken
 ```
 
 #### 3. Clone the Target Snapshot Into Place
 
-Create a fresh, writeable clone of your working snapshot and position it exactly where Fedora expects it (root). Because Btrfs uses Copy-on-Write metadata linking, this layout manipulation is instantaneous and consumes no additional storage space:
+Create a fresh, writeable clone of your working snapshot and position it exactly where Fedora expects it (`root`). Because Btrfs uses Copy-on-Write metadata linking, this layout manipulation is instantaneous and consumes no additional storage space:
 
 ```bash
-sudo btrfs subvolume snapshot root_broken/.snapshots/TARGET_NUM/snapshot root
+sudo btrfs subvolume snapshot /mnt/root_broken/.snapshots/TARGET_NUM/snapshot /mnt/root
 ```
 
-#### 4. Safely Unmount and Reboot
+#### 4. CRITICAL FIX: Move the Nested `.snapshots` Subvolume
 
-Exit the mount folder, unmount the drive access layer, and restart your computer:
+Because Btrfs snapshots are non-recursive, the newly created `root` subvolume is a clean clone of the snapshot, but **does not** contain the nested `.snapshots` subvolume (which holds your snapper configurations and entire snapshot history). 
+
+To preserve your snapshot history and keep Snapper working seamlessly, move the nested `.snapshots` subvolume from the broken root back into the new active root:
 
 ```bash
-cd ~
+sudo mv /mnt/root_broken/.snapshots /mnt/root/
+```
+
+> [!NOTE]
+> Moving `.snapshots` out of `root_broken` is also what allows you to delete `root_broken` later. Btrfs will refuse to delete a subvolume if it contains nested subvolumes.
+
+#### 5. Flag for SELinux Relabeling
+
+Fedora uses SELinux by default. When booting into a manually cloned subvolume, file security contexts might get mismatched, which can cause boot stalls, login loops, or systemd services failing to start. Flag the root partition for an automatic, full SELinux relabel on the next boot:
+
+```bash
+sudo touch /mnt/root/.autorelabel
+```
+
+#### 6. Cleanup and Reboot
+
+Unmount the drive access layer and restart your computer:
+
+```bash
 sudo umount /mnt
 sudo reboot
 ```
@@ -164,3 +183,25 @@ sudo mount -o subvol=/ /dev/sdXN /mnt
 sudo btrfs subvolume delete /mnt/root_broken
 sudo umount /mnt
 ```
+
+---
+
+## Phase 6: The `/boot` vs `/lib/modules` Kernel Mismatch (Crucial Gotcha)
+
+On Fedora, `/boot` (containing kernel binaries and initramfs files) is formatted as a separate `ext4` partition, while `/boot/efi` is a separate `fat32` partition. Neither of these partitions is part of your Btrfs root (`/`) subvolume, meaning **they are not snapshotted or rolled back**.
+
+### The Problem
+If a kernel update is what broke your system and you roll back to a snapshot taken *before* that update:
+1. The new kernel binary remains in `/boot`.
+2. The corresponding kernel modules in `/lib/modules/<new-kernel>` are **wiped out** (reverted to the old snapshot state).
+3. On reboot, GRUB will default to booting the new kernel from `/boot`, but it will fail to load drivers (Wi-Fi, GPU, USB, etc.) because its modules in `/lib/modules` no longer exist.
+
+### The Fix
+1. **Boot into the correct kernel**:
+   * **If the snapshot is recent:** The **exact kernel version** that was running when the snapshot was taken should still reside in `/boot` (Fedora retains the last 3 kernels by default). Press `Esc` at the GRUB menu, select that specific older kernel version, and boot into it. Everything will load normally.
+   * **If the snapshot is old:** The exact matching kernel binary in `/boot` may have been rotated out and deleted. In this case, select the **newest available kernel** from the GRUB menu. It will boot up, but since `/lib/modules` on your rolled-back root does not have its modules, drivers like Wi-Fi or graphics will not load. This is normal; proceed immediately to Step 2.
+2. **Re-sync your system**: Once booted into the desktop, run the following command to download, install, and generate the matching modules for your running kernel:
+   ```bash
+   sudo dnf reinstall kernel-core kernel-modules kernel-devel
+   ```
+   Or simply run a system update (`sudo dnf upgrade`) to pull the latest working kernel and build its modules cleanly on the new root.
