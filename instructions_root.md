@@ -205,3 +205,5 @@ If a kernel update is what broke your system and you roll back to a snapshot tak
    sudo dnf reinstall kernel-core kernel-modules kernel-devel
    ```
    Or simply run a system update (`sudo dnf upgrade`) to pull the latest working kernel and build its modules cleanly on the new root.
+
+   Cosnider disabling btfs quotas to prevent freezes.
